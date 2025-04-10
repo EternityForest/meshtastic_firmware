@@ -41,6 +41,11 @@ WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, config.network.ntp_server);
 #endif
 
+#ifdef HAS_UDP_MULTICAST
+#include "mesh/udp/UdpMulticastThread.h"
+extern UdpMulticastThread *udpThread;
+#endif
+
 uint8_t wifiDisconnectReason = 0;
 
 // Stores our hostname

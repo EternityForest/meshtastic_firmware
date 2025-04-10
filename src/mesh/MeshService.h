@@ -10,6 +10,7 @@
 #include "MeshTypes.h"
 #include "Observer.h"
 #include "PointerQueue.h"
+
 #if defined(ARCH_PORTDUINO)
 #include "../platform/portduino/SimRadio.h"
 #endif
@@ -75,7 +76,7 @@ class MeshService
 
     MeshService();
 
-    void init();
+    virtual void init();
 
     /// Do idle processing (mostly processing messages which have been queued from the radio)
     void loop();
@@ -162,8 +163,19 @@ class MeshService
 #endif
     /// Handle a packet that just arrived from the radio.  This method does _not_ free the provided packet.  If it
     /// needs to keep the packet around it makes a copy
-    int handleFromRadio(const meshtastic_MeshPacket *p);
+    virtual int handleFromRadio(const meshtastic_MeshPacket *p);
     friend class RoutingModule;
+};
+
+/* 
+*  This is the default service when using meshtastic in App Mode;
+*
+*
+*/
+class AppMeshService : public MeshService {
+  public:
+    void init();
+    int handleFromRadio(const meshtastic_MeshPacket *p);
 };
 
 extern MeshService *service;

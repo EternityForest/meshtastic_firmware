@@ -21,6 +21,7 @@
 #include "detect/ScanI2C.h"
 #include "error.h"
 #include "power.h"
+#include "libmeshtastic.h"
 
 #if !MESHTASTIC_EXCLUDE_I2C
 #include "detect/ScanI2CTwoWire.h"
@@ -105,6 +106,7 @@ NRF52Bluetooth *nrf52Bluetooth = nullptr;
 #include "AmbientLightingThread.h"
 #include "PowerFSMThread.h"
 
+
 #if !defined(ARCH_PORTDUINO) && !defined(ARCH_STM32WL) && !MESHTASTIC_EXCLUDE_I2C
 #include "motion/AccelerometerThread.h"
 AccelerometerThread *accelerometerThread = nullptr;
@@ -117,11 +119,6 @@ AudioThread *audioThread = nullptr;
 
 #if HAS_TFT
 extern void tftSetup(void);
-#endif
-
-#ifdef HAS_UDP_MULTICAST
-#include "mesh/udp/UdpMulticastThread.h"
-UdpMulticastThread *udpThread = nullptr;
 #endif
 
 #if defined(TCXO_OPTIONAL)
@@ -190,27 +187,6 @@ bool pmu_found;
 std::pair<uint8_t, TwoWire *> nodeTelemetrySensorsMap[_meshtastic_TelemetrySensorType_MAX + 1] = {};
 #endif
 
-Router *router = NULL; // Users of router don't care what sort of subclass implements that API
-
-const char *firmware_version = optstr(APP_VERSION_SHORT);
-
-const char *getDeviceName()
-{
-    uint8_t dmac[6];
-
-    getMacAddr(dmac);
-
-    // Meshtastic_ab3c or Shortname_abcd
-    static char name[20];
-    snprintf(name, sizeof(name), "%02x%02x", dmac[4], dmac[5]);
-    // if the shortname exists and is NOT the new default of ab3c, use it for BLE name.
-    if (strcmp(owner.short_name, name) != 0) {
-        snprintf(name, sizeof(name), "%s_%02x%02x", owner.short_name, dmac[4], dmac[5]);
-    } else {
-        snprintf(name, sizeof(name), "Meshtastic_%02x%02x", dmac[4], dmac[5]);
-    }
-    return name;
-}
 
 #if defined(ELECROW_ThinkNode_M1) || defined(ELECROW_ThinkNode_M2)
 static int32_t ledBlinkCount = 0;
@@ -298,6 +274,7 @@ RadioInterface *rIf = NULL;
 RadioLibHal *RadioLibHAL = NULL;
 #endif
 
+
 /**
  * Some platforms (nrf52) might provide an alterate version that suppresses calling delay from sleep.
  */
@@ -358,11 +335,7 @@ void setup()
 #endif
 
     concurrency::hasBeenSetup = true;
-#if ARCH_PORTDUINO
-    SPISettings spiSettings(settingsMap[spiSpeed], MSBFIRST, SPI_MODE0);
-#else
-    SPISettings spiSettings(4000000, MSBFIRST, SPI_MODE0);
-#endif
+
 
     meshtastic_Config_DisplayConfig_OledType screen_model =
         meshtastic_Config_DisplayConfig_OledType::meshtastic_Config_DisplayConfig_OledType_OLED_AUTO;
@@ -755,16 +728,20 @@ void setup()
 
     // We do this as early as possible because this loads preferences from flash
     // but we need to do this after main cpu init (esp32setup), because we need the random seed set
-    nodeDB = new NodeDB;
+    NodeDB *newNodeDB = new NodeDB();
+
+    libmeshtastic.setNodeDB(newNodeDB);
+
+    Router *newrouter = NULL; 
 
     // If we're taking on the repeater role, use NextHopRouter and turn off 3V3_S rail because peripherals are not needed
     if (config.device.role == meshtastic_Config_DeviceConfig_Role_REPEATER) {
-        router = new NextHopRouter();
+        newrouter = new NextHopRouter();
 #ifdef PIN_3V3_EN
         digitalWrite(PIN_3V3_EN, LOW);
 #endif
     } else
-        router = new ReliableRouter();
+        newrouter = new ReliableRouter();
 
 #if HAS_BUTTON || defined(ARCH_PORTDUINO)
     // Buttons. Moved here cause we need NodeDB to be initialized
@@ -896,19 +873,14 @@ void setup()
     audioThread = new AudioThread();
 #endif
 
+
+
+    libmeshtastic.begin(new AppMeshService(), newrouter);
+
 #ifdef HAS_UDP_MULTICAST
-    LOG_DEBUG("Start multicast thread");
-    udpThread = new UdpMulticastThread();
-#ifdef ARCH_PORTDUINO
-    // FIXME: portduino does not ever call onNetworkConnected so call it here because I don't know what happen if I call
-    // onNetworkConnected there
-    if (config.network.enabled_protocols & meshtastic_Config_NetworkConfig_ProtocolFlags_UDP_BROADCAST) {
-        udpThread->start();
-    }
+    libmeshtastic.enableUDPMulticast();
 #endif
-#endif
-    service = new MeshService();
-    service->init();
+
 
     // Now that the mesh service is created, create any modules
     setupModules();
@@ -953,57 +925,16 @@ void setup()
     delay(PIN_PWR_DELAY_MS);
 #endif
 
+
+#if ARCH_PORTDUINO
+    SPISettings spiSettings(settingsMap[spiSpeed], MSBFIRST, SPI_MODE0);
+#else
+    SPISettings spiSettings(4000000, MSBFIRST, SPI_MODE0);
+#endif
+
+
 #ifdef ARCH_PORTDUINO
-    const struct {
-        configNames cfgName;
-        std::string strName;
-    } loraModules[] = {{use_rf95, "RF95"},     {use_sx1262, "sx1262"}, {use_sx1268, "sx1268"}, {use_sx1280, "sx1280"},
-                       {use_lr1110, "lr1110"}, {use_lr1120, "lr1120"}, {use_lr1121, "lr1121"}, {use_llcc68, "LLCC68"}};
-    // as one can't use a function pointer to the class constructor:
-    auto loraModuleInterface = [](configNames cfgName, LockingArduinoHal *hal, RADIOLIB_PIN_TYPE cs, RADIOLIB_PIN_TYPE irq,
-                                  RADIOLIB_PIN_TYPE rst, RADIOLIB_PIN_TYPE busy) {
-        switch (cfgName) {
-        case use_rf95:
-            return (RadioInterface *)new RF95Interface(hal, cs, irq, rst, busy);
-        case use_sx1262:
-            return (RadioInterface *)new SX1262Interface(hal, cs, irq, rst, busy);
-        case use_sx1268:
-            return (RadioInterface *)new SX1268Interface(hal, cs, irq, rst, busy);
-        case use_sx1280:
-            return (RadioInterface *)new SX1280Interface(hal, cs, irq, rst, busy);
-        case use_lr1110:
-            return (RadioInterface *)new LR1110Interface(hal, cs, irq, rst, busy);
-        case use_lr1120:
-            return (RadioInterface *)new LR1120Interface(hal, cs, irq, rst, busy);
-        case use_lr1121:
-            return (RadioInterface *)new LR1121Interface(hal, cs, irq, rst, busy);
-        case use_llcc68:
-            return (RadioInterface *)new LLCC68Interface(hal, cs, irq, rst, busy);
-        default:
-            assert(0); // shouldn't happen
-            return (RadioInterface *)nullptr;
-        }
-    };
-    for (auto &loraModule : loraModules) {
-        if (settingsMap[loraModule.cfgName] && !rIf) {
-            LOG_DEBUG("Activate %s radio on SPI port %s", loraModule.strName.c_str(), settingsStrings[spidev].c_str());
-            if (settingsStrings[spidev] == "ch341") {
-                RadioLibHAL = ch341Hal;
-            } else {
-                RadioLibHAL = new LockingArduinoHal(SPI, spiSettings);
-            }
-            rIf = loraModuleInterface(loraModule.cfgName, (LockingArduinoHal *)RadioLibHAL, settingsMap[cs_pin],
-                                      settingsMap[irq_pin], settingsMap[reset_pin], settingsMap[busy_pin]);
-            if (!rIf->init()) {
-                LOG_WARN("No %s radio", loraModule.strName.c_str());
-                delete rIf;
-                rIf = NULL;
-                exit(EXIT_FAILURE);
-            } else {
-                LOG_INFO("%s init success", loraModule.strName.c_str());
-            }
-        }
-    }
+    libmeshtastic.setupPortduinoLoRa();
 #elif defined(HW_SPI1_DEVICE)
     LockingArduinoHal *RadioLibHAL = new LockingArduinoHal(SPI1, spiSettings);
 #else // HW_SPI1_DEVICE
